@@ -1,10 +1,27 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 
 class BaseCodec(object):
     """
-    Base audio/video codec class.
+    Base audio/video/subtitle codec class.
     """
+    DISPOSITIONS = [
+        'default',
+        'dub',
+        'original',
+        'comment',
+        'lyrics',
+        'karaoke',
+        'forced',
+        'hearing_impaired',
+        'visual_impaired',
+        # 'clean_effects',
+        # 'attached_pic',
+        'captions',
+        # 'descriptions',
+        # 'dependent',
+        # 'metadata',
+    ]
 
     encoder_options = {}
     codec_name = None
@@ -20,6 +37,13 @@ class BaseCodec(object):
 
     def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
         return []
+
+    def safe_disposition(self, dispo):
+        dispo = dispo or ""
+        for d in self.DISPOSITIONS:
+            if d not in dispo:
+                dispo += '-' + d
+        return dispo
 
     def safe_options(self, opts):
         safe = {}
@@ -44,8 +68,9 @@ class AudioCodec(BaseCodec):
       * channels (integer) - number of audio channels
       * bitrate (integer) - stream bitrate
       * samplerate (integer) - sample rate (frequency)
-      * language (str) - language of audio stream (3 char code)
+      * language (string) - language of audio stream (3 char code)
       * map (int) - stream index
+      * disposition (string) - disposition string (+default+forced)
 
     Supported audio codecs are: null (no audio), copy (copy from
     original), vorbis, aac, mp3, mp2
@@ -54,6 +79,7 @@ class AudioCodec(BaseCodec):
     encoder_options = {
         'codec': str,
         'language': str,
+        'title': str,
         'channels': int,
         'bitrate': int,
         'samplerate': int,
@@ -101,6 +127,10 @@ class AudioCodec(BaseCodec):
             if len(x) < 1:
                 del safe['filter']
 
+        if 'disposition' in safe:
+            if len(safe['disposition'].strip()) < 1:
+                del safe['disposition']
+
         safe = self._codec_specific_parse_options(safe)
         optlist = []
         optlist.extend(['-c:a:' + stream, self.ffmpeg_codec_name])
@@ -108,21 +138,24 @@ class AudioCodec(BaseCodec):
             optlist.extend(['-i', str(safe['path'])])
         if 'map' in safe:
             optlist.extend(['-map', s + ':' + str(safe['map'])])
-        if 'disposition' in safe:
-            optlist.extend(['-disposition:a:' + stream, str(safe['disposition'])])
         if 'channels' in safe:
             optlist.extend(['-ac:a:' + stream, str(safe['channels'])])
         if 'bitrate' in safe:
             optlist.extend(['-b:a:' + stream, str(br) + 'k'])
+            optlist.extend(['-metadata:s:a:' + stream, 'BPS=' + str(br * 1000)])
+            optlist.extend(['-metadata:s:a:' + stream, 'BPS-eng=' + str(br * 1000)])
         if 'samplerate' in safe:
             optlist.extend(['-ar:a:' + stream, str(safe['samplerate'])])
         if 'filter' in safe:
             optlist.extend(['-filter:a:' + stream, str(safe['filter'])])
+        if 'title' in safe:
+            optlist.extend(['-metadata:s:a:' + stream, "title=" + str(safe['title'])])
         if 'language' in safe:
             lang = str(safe['language'])
         else:
             lang = 'und'  # Never leave blank if not specified, always set to und for undefined
         optlist.extend(['-metadata:s:a:' + stream, "language=" + lang])
+        optlist.extend(['-disposition:a:' + stream, self.safe_disposition(safe.get('dispo'))])
 
         optlist.extend(self._codec_specific_produce_ffmpeg_list(safe))
         return optlist
@@ -134,8 +167,7 @@ class SubtitleCodec(BaseCodec):
     parameters are:
       * codec (string) - subtitle codec name (mov_text, subrib, ssa only supported currently)
       * language (string) - language of subtitle stream (3 char code)
-      * forced (int) - force subtitles (1 true, 0 false)
-      * default (int) - default subtitles (1 true, 0 false)
+      * disposition (string) - disposition as string (+default+forced)
 
     Supported subtitle codecs are: null (no subtitle), mov_text
     """
@@ -143,28 +175,18 @@ class SubtitleCodec(BaseCodec):
     encoder_options = {
         'codec': str,
         'language': str,
-        'forced': int,
-        'default': int,
+        'title': str,
         'map': int,
         'source': int,
         'path': str,
-        'encoding': str
+        'encoding': str,
+        'disposition': str,
     }
 
     def parse_options(self, opt, stream=0):
         super(SubtitleCodec, self).parse_options(opt)
         stream = str(stream)
         safe = self.safe_options(opt)
-
-        if 'forced' in safe:
-            f = safe['forced']
-            if f < 0 or f > 1:
-                del safe['forced']
-
-        if 'default' in safe:
-            d = safe['default']
-            if d < 0 or d > 1:
-                del safe['default']
 
         if 'language' in safe:
             l = safe['language']
@@ -180,6 +202,10 @@ class SubtitleCodec(BaseCodec):
             if not safe['encoding']:
                 del safe['encoding']
 
+        if 'disposition' in safe:
+            if len(safe['disposition'].strip()) < 1:
+                del safe['disposition']
+
         safe = self._codec_specific_parse_options(safe)
 
         optlist = []
@@ -191,15 +217,14 @@ class SubtitleCodec(BaseCodec):
             optlist.extend(['-map', s + ':' + str(safe['map'])])
         if 'path' in safe:
             optlist.extend(['-i', str(safe['path'])])
-        if 'default' in safe:
-            optlist.extend(['-metadata:s:s:' + stream, "disposition:default=" + str(safe['default'])])
-        if 'forced' in safe:
-            optlist.extend(['-metadata:s:s:' + stream, "disposition:forced=" + str(safe['forced'])])
+        if 'title' in safe:
+            optlist.extend(['-metadata:s:s:' + stream, "title=" + str(safe['title'])])
         if 'language' in safe:
             lang = str(safe['language'])
         else:
             lang = 'und'  # Never leave blank if not specified, always set to und for undefined
         optlist.extend(['-metadata:s:s:' + stream, "language=" + lang])
+        optlist.extend(['-disposition:s:' + stream, self.safe_disposition(safe.get('dispo'))])
 
         optlist.extend(self._codec_specific_produce_ffmpeg_list(safe))
         return optlist
@@ -238,7 +263,9 @@ class VideoCodec(BaseCodec):
         'codec': str,
         'bitrate': int,
         'crf': int,
-        'fps': int,
+        'maxrate': str,
+        'bufsize': str,
+        'fps': float,
         'width': int,
         'height': int,
         'mode': str,
@@ -246,6 +273,7 @@ class VideoCodec(BaseCodec):
         'src_height': int,
         'filter': str,
         'pix_fmt': str,
+        'field_order': str,
         'map': int
     }
 
@@ -314,12 +342,12 @@ class VideoCodec(BaseCodec):
 
         if 'fps' in safe:
             f = safe['fps']
-            if f < 1 or f > 120:
+            if f < 1:
                 del safe['fps']
 
         if 'bitrate' in safe:
-            br = safe['bitrate']
-            if br < 16 or br > 15000:
+            bitrate = safe['bitrate']
+            if bitrate < 1:
                 del safe['bitrate']
 
         if 'crf' in safe:
@@ -327,17 +355,23 @@ class VideoCodec(BaseCodec):
             if crf < 0 or crf > 51:
                 del safe['crf']
 
+        if 'field_order' in safe:
+            if safe['field_order'] not in ['progressive', 'tt', 'bb', 'tb', 'bt']:
+                del safe['field_order']
+
         w = None
         h = None
 
         if 'width' in safe:
             w = safe['width']
-            if w < 16 or w > 4000:
+            if w < 16:
+                del safe['width']
                 w = None
 
         if 'height' in safe:
             h = safe['height']
-            if h < 16 or h > 3000:
+            if h < 16:
+                del safe['height']
                 h = None
 
         sw = None
@@ -367,37 +401,45 @@ class VideoCodec(BaseCodec):
 
         safe = self._codec_specific_parse_options(safe)
 
-        w = safe['width']
-        h = safe['height']
-        filters = safe['aspect_filters']
+        w = safe.get('width', None)
+        h = safe.get('height', None)
+        filters = safe.get('aspect_filters', None)
 
         optlist = ['-vcodec', self.ffmpeg_codec_name]
         if 'map' in safe:
             optlist.extend(['-map', '0:' + str(safe['map'])])
         if 'fps' in safe:
-            optlist.extend(['-r', str(safe['fps'])])
+            optlist.extend(['-r:v', str(safe['fps'])])
         if 'pix_fmt' in safe:
             optlist.extend(['-pix_fmt', str(safe['pix_fmt'])])
-        if 'bitrate' in safe:
-            optlist.extend(['-vb', str(safe['bitrate']) + 'k'])  # FIXED
+        if 'field_order' in safe:
+            optlist.extend(['-field_order', str(safe['field_order'])])
+        # CRF gets priority over bitrate, but if bitrate is present without maxrate, use bitrate as maxrate
         if 'crf' in safe:
             optlist.extend(['-crf', str(safe['crf'])])
+            if 'maxrate' in safe:
+                optlist.extend(['-maxrate:v', str(safe['maxrate'])])
+            elif 'bitrate' in safe:
+                optlist.extend(['-maxrate:v', str(safe['bitrate']) + 'k'])
+            if 'bufsize' in safe:
+                optlist.extend(['-bufsize', str(safe['bufsize'])])
+        elif 'bitrate' in safe:
+            optlist.extend(['-vb', str(safe['bitrate']) + 'k'])
+        if 'bitrate' in safe:
+            optlist.extend(['-metadata:s:v', 'BPS=' + str(safe['bitrate'] * 1000)])
+            optlist.extend(['-metadata:s:v', 'BPS-eng=' + str(safe['bitrate'] * 1000)])
         if 'filter' in safe:
-            if filters:
-                filters = '%s;%s' % (filters, str(safe['filter']))
-            else:
-                filters = str(safe['filter'])
+            optlist.extend(['-vf', str(safe['filter'])])
+        if filters:
+            optlist.extend(['-vf', filters])
         if w and h:
             optlist.extend(['-s', '%dx%d' % (w, h)])
-
             if ow and oh:
                 optlist.extend(['-aspect', '%d:%d' % (ow, oh)])
 
-        if filters:
-            optlist.extend(['-vf', filters])
-
         optlist.extend(self._codec_specific_produce_ffmpeg_list(safe))
 
+        # consolidate filters
         if optlist.count('-vf') > 1:
             vf = []
             while optlist.count('-vf') > 0:
@@ -406,7 +448,7 @@ class VideoCodec(BaseCodec):
 
             vfstring = ""
             for line in vf:
-                vfstring = "%s;%s" % (vfstring, line)
+                vfstring = "%s,%s" % (vfstring, line)
 
             optlist.extend(['-vf', vfstring[1:]])
 
@@ -450,14 +492,25 @@ class AudioCopyCodec(BaseCodec):
     Copy audio stream directly from the source.
     """
     codec_name = 'copy'
-    encoder_options = {'language': str,
+    encoder_options = {'map': int,
                        'source': str,
-                       'map': int,
                        'bsf': str,
-                       'disposition': str}
+                       'disposition': str,
+                       'language': str,
+                       'title': str}
 
     def parse_options(self, opt, stream=0):
         safe = self.safe_options(opt)
+
+        if 'disposition' in safe:
+            if len(safe['disposition'].strip()) < 1:
+                del safe['disposition']
+
+        if 'language' in safe:
+            l = safe['language']
+            if len(l) > 3:
+                del safe['language']
+
         stream = str(stream)
         optlist = []
         optlist.extend(['-c:a:' + stream, 'copy'])
@@ -469,16 +522,14 @@ class AudioCopyCodec(BaseCodec):
             optlist.extend(['-map', s + ':' + str(safe['map'])])
         if 'bsf' in safe:
             optlist.extend(['-bsf:a:' + stream, str(safe['bsf'])])
-        lang = 'und'
+        if 'title' in safe:
+            optlist.extend(['-metadata:s:a:' + stream, "title=" + str(safe['title'])])
         if 'language' in safe:
-            l = safe['language']
-            if len(l) > 3:
-                del safe['language']
-            else:
-                lang = str(safe['language'])
+            lang = str(safe['language'])
+        else:
+            lang = 'und'
         optlist.extend(['-metadata:s:a:' + stream, "language=" + lang])
-        if 'disposition' in safe:
-            optlist.extend(['-disposition:a:' + stream, str(safe['disposition'])])
+        optlist.extend(['-disposition:a:' + stream, self.safe_disposition(safe.get('dispo'))])
         return optlist
 
 
@@ -488,18 +539,27 @@ class VideoCopyCodec(BaseCodec):
     """
     codec_name = 'copy'
     encoder_options = {'map': int,
-                       'source': str}
+                       'source': str,
+                       'fps': float}
 
     def parse_options(self, opt, stream=0):
         safe = self.safe_options(opt)
         optlist = []
         optlist.extend(['-vcodec', 'copy'])
+
+        if 'fps' in safe:
+            f = safe['fps']
+            if f < 1:
+                del safe['fps']
+
         if 'source' in safe:
             s = str(safe['source'])
         else:
             s = str(0)
         if 'map' in safe:
             optlist.extend(['-map', s + ':' + str(safe['map'])])
+        if 'fps' in safe:
+            optlist.extend(['-r:v', str(safe['fps'])])
         return optlist
 
 
@@ -509,20 +569,68 @@ class SubtitleCopyCodec(BaseCodec):
     """
     codec_name = 'copy'
     encoder_options = {'map': int,
-                       'source': str}
+                       'source': str,
+                       'disposition': str,
+                       'language': str,
+                       'title': str}
 
     optlist = []
 
     def parse_options(self, opt, stream=0):
         safe = self.safe_options(opt)
+
+        if 'disposition' in safe:
+            if len(safe['disposition'].strip()) < 1:
+                del safe['disposition']
+
+        if 'language' in safe:
+            l = safe['language']
+            if len(l) > 3:
+                del safe['language']
+
         stream = str(stream)
+        optlist = []
+        optlist.extend(['-c:s:' + stream, 'copy'])
         if 'source' in safe:
             s = str(safe['source'])
         else:
             s = str(0)
         if 'map' in safe:
             optlist.extend(['-map', s + ':' + str(safe['map'])])
-        optlist.extend(['-c:s:' + stream, copy])
+        if 'title' in safe:
+            optlist.extend(['-metadata:s:s:' + stream, "title=" + str(safe['title'])])
+        if 'language' in safe:
+            lang = str(safe['language'])
+        else:
+            lang = 'und'
+        optlist.extend(['-metadata:s:s:' + stream, "language=" + lang])
+        optlist.extend(['-disposition:s:' + stream, self.safe_disposition(safe.get('dispo'))])
+
+        return optlist
+
+
+class AttachmentCopyCodec(BaseCodec):
+    """
+    Copy attachment stream directly from the source.
+    """
+    codec_name = 'copy'
+    encoder_options = {'map': int,
+                       'source': str}
+
+    optlist = []
+
+    def parse_options(self, opt, stream=0):
+        safe = self.safe_options(opt)
+
+        stream = str(stream)
+        optlist = []
+        optlist.extend(['-c:t:' + stream, 'copy'])
+        if 'source' in safe:
+            s = str(safe['source'])
+        else:
+            s = str(0)
+        if 'map' in safe:
+            optlist.extend(['-map', s + ':' + str(safe['map'])])
         return optlist
 
 
@@ -610,6 +718,7 @@ class Ac3Codec(AudioCodec):
                 opt['channels'] = 6
         return super(Ac3Codec, self).parse_options(opt, stream)
 
+
 class EAc3Codec(AudioCodec):
     """
     Dolby Digital Plus/EAC3 audio codec.
@@ -647,6 +756,10 @@ class DtsCodec(AudioCodec):
     """
     codec_name = 'dts'
     ffmpeg_codec_name = 'dts'
+    dts_experimental_enable = ['-strict', 'experimental']
+
+    def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
+        return self.dts_experimental_enable
 
 
 class Mp3Codec(AudioCodec):
@@ -663,6 +776,34 @@ class Mp2Codec(AudioCodec):
     """
     codec_name = 'mp2'
     ffmpeg_codec_name = 'mp2'
+
+
+class Opus(AudioCodec):
+    """
+    Opus audio codec
+    """
+    codec_name = 'opus'
+    ffmpeg_codec_name = 'libopus'
+    opus_experimental_enable = ['-strict', 'experimental']
+
+    def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
+        return self.opus_experimental_enable
+
+
+class PCMS24LE(AudioCodec):
+    """
+    PCM_S24LE Audio Codec
+    """
+    codec_name = 'pcm_s24le'
+    ffmpeg_codec_name = 'pcm_s24le'
+
+
+class PCMS16LE(AudioCodec):
+    """
+    PCM_S16LE Audio Codec
+    """
+    codec_name = 'pcm_s16le'
+    ffmpeg_codec_name = 'pcm_s16le'
 
 
 # Video Codecs
@@ -695,23 +836,24 @@ class H264Codec(VideoCodec):
     encoder_options.update({
         'preset': str,  # common presets are ultrafast, superfast, veryfast,
         # faster, fast, medium(default), slow, slower, veryslow
-        'quality': int,  # constant rate factor, range:0(lossless)-51(worst)
-        # default:23, recommended: 18-28
         'profile': str,  # default: not-set, for valid values see above link
         'level': float,  # default: not-set, values range from 3.0 to 4.2
         'tune': str,  # default: not-set, for valid values see above link
         'wscale': int,  # special handlers for the even number requirements of h264
         'hscale': int  # special handlers for the even number requirements of h264
     })
+    scale_filter = 'scale'
 
-    def parse_options(self, opt, stream=0):
-        if 'width' in opt:
-            opt['wscale'] = opt['width']
-            del(opt['width'])
-        if 'height' in opt:
-            opt['hscale'] = opt['height']
-            del(opt['height'])
-        return super(H264Codec, self).parse_options(opt, stream)
+    def _codec_specific_parse_options(self, safe, stream=0):
+        if 'width' in safe and safe['width']:
+            safe['width'] = 2 * round(safe['width'] / 2)
+            safe['wscale'] = safe['width']
+            del(safe['width'])
+        if 'height' in safe and safe['height']:
+            if safe['height'] % 2 == 0:
+                safe['hscale'] = safe['height']
+            del(safe['height'])
+        return safe
 
     def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
         optlist = []
@@ -721,8 +863,6 @@ class H264Codec(VideoCodec):
 
         if 'preset' in safe:
             optlist.extend(['-preset', safe['preset']])
-        if 'quality' in safe:
-            optlist.extend(['-crf', str(safe['quality'])])
         if 'profile' in safe:
             optlist.extend(['-profile:v', safe['profile']])
         if 'level' in safe:
@@ -730,11 +870,11 @@ class H264Codec(VideoCodec):
         if 'tune' in safe:
             optlist.extend(['-tune', safe['tune']])
         if 'wscale' in safe and 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:%s' % (safe['wscale'], safe['hscale'])])
+            optlist.extend(['-vf', '%s=%s:%s' % (self.scale_filter, safe['wscale'], safe['hscale'])])
         elif 'wscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:trunc(ow/a/2)*2' % (safe['wscale'])])
+            optlist.extend(['-vf', '%s=%s:trunc(ow/a/2)*2' % (self.scale_filter, safe['wscale'])])
         elif 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=trunc((oh*a)/2)*2:%s' % (safe['hscale'])])
+            optlist.extend(['-vf', '%s=trunc((oh*a)/2)*2:%s' % (self.scale_filter, safe['hscale'])])
         return optlist
 
 
@@ -742,38 +882,58 @@ class NVEncH264(H264Codec):
     """
     Nvidia H.264/AVC video codec.
     """
-    codec_name = 'nvenc_h264'
-    ffmpeg_codec_name = 'nvenc_h264'
+    codec_name = 'h264_nvenc'
+    ffmpeg_codec_name = 'h264_nvenc'
+    scale_filter = 'scale_npp'
+
+
+class VideotoolboxEncH264(H264Codec):
+    """
+    Videotoolbox H.264/AVC video codec.
+    """
+    codec_name = 'h264_videotoolbox'
+    ffmpeg_codec_name = 'h264_videotoolbox'
+
+
+class OMXH264(H264Codec):
+    """
+    OMX H.264/AVC video codec.
+    """
+    codec_name = 'h264_omx'
+    ffmpeg_codec_name = 'h264_omx'
 
 
 class H264VAAPI(H264Codec):
     """
-    H.264/AVC video codec.
+    H.264/AVC VAAPI video codec.
     """
     codec_name = 'h264vaapi'
     ffmpeg_codec_name = 'h264_vaapi'
+    scale_filter = 'scale_vaapi'
+
+    def _codec_specific_parse_options(self, safe, stream=0):
+        if 'width' in safe and safe['width']:
+            safe['width'] = 2 * round(safe['width'] / 2)
+            safe['vaapi_wscale'] = safe['width']
+            del(safe['width'])
+        if 'height' in safe and safe['height']:
+            if safe['height'] % 2 == 0:
+                safe['vaapi_hscale'] = safe['height']
+            del(safe['height'])
+        return safe
 
     def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
-        optlist = []
+        optlist = super(H264VAAPI, self)._codec_specific_produce_ffmpeg_list(safe, stream)
         optlist.extend(['-vaapi_device', '/dev/dri/renderD128'])
-        if 'preset' in safe:
-            optlist.extend(['-preset', safe['preset']])
-        if 'quality' in safe:
-            optlist.extend(['-crf', str(safe['quality'])])
-        if 'profile' in safe:
-            optlist.extend(['-profile:v', safe['profile']])
-        if 'level' in safe:
-            optlist.extend(['-level', '%0.0f' % (safe['level'] * 10)])  # Automatically multiplied by 10
-        if 'tune' in safe:
-            optlist.extend(['-tune', safe['tune']])
-        # Start VF
-        optlist.extend(['-vf', "format=nv12,hwupload"])
-        if 'wscale' in safe and 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:%s' % (safe['wscale'], safe['hscale'])])
-        elif 'wscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:trunc(ow/a/2)*2' % (safe['wscale'])])
-        elif 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=trunc((oh*a)/2)*2:%s' % (safe['hscale'])])
+        if 'vaapi_wscale' in safe and 'vaapi_hscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=%s:%s:format=nv12' % (self.scale_filter, safe['vaapi_wscale'], safe['vaapi_hscale'])])
+        elif 'vaapi_wscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=%s:trunc(ow/a/2)*2:format=nv12' % (self.scale_filter, safe['vaapi_wscale'])])
+        elif 'vaapi_hscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=trunc((oh*a)/2)*2:%s:format=nv12' % (self.scale_filter, safe['vaapi_hscale'])])
+        else:
+            optlist.extend(['-vf', "format=nv12,hwupload"])
+
         return optlist
 
 
@@ -783,9 +943,10 @@ class H264QSV(H264Codec):
     """
     codec_name = 'h264qsv'
     ffmpeg_codec_name = 'h264_qsv'
+    scale_filter = 'scale_qsv'
 
     def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
-        optlist = []
+        optlist = super(H264QSV, self)._codec_specific_produce_ffmpeg_list(safe, stream)
         optlist.extend(['-look_ahead', '0'])
         return optlist
 
@@ -800,31 +961,30 @@ class H265Codec(VideoCodec):
     encoder_options.update({
         'preset': str,  # common presets are ultrafast, superfast, veryfast,
         # faster, fast, medium(default), slow, slower, veryslow
-        'quality': int,  # constant rate factor, range:0(lossless)-51(worst)
-        # default:23, recommended: 18-28
         'profile': str,  # default: not-set, for valid values see above link
         'level': float,  # default: not-set, values range from 3.0 to 4.2
         'tune': str,  # default: not-set, for valid values see above link
         'wscale': int,  # special handlers for the even number requirements of h265
         'hscale': int  # special handlers for the even number requirements of h265
     })
+    scale_filter = 'scale'
 
-    def parse_options(self, opt, stream=0):
-        if 'width' in opt:
-            opt['wscale'] = opt['width']
-            del(opt['width'])
-        if 'height' in opt:
-            opt['hscale'] = opt['height']
-            del(opt['height'])
-        return super(H265Codec, self).parse_options(opt, stream)
+    def _codec_specific_parse_options(self, safe, stream=0):
+        if 'width' in safe and safe['width']:
+            safe['width'] = 2 * round(safe['width'] / 2)
+            safe['wscale'] = safe['width']
+            del(safe['width'])
+        if 'height' in safe and safe['height']:
+            if safe['height'] % 2 == 0:
+                safe['hscale'] = safe['height']
+            del(safe['height'])
+        return safe
 
     def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
         optlist = []
 
         if 'preset' in safe:
             optlist.extend(['-preset', safe['preset']])
-        if 'quality' in safe:
-            optlist.extend(['-crf', str(safe['quality'])])
         if 'profile' in safe:
             optlist.extend(['-profile:v', safe['profile']])
         if 'level' in safe:
@@ -832,11 +992,11 @@ class H265Codec(VideoCodec):
         if 'tune' in safe:
             optlist.extend(['-tune', safe['tune']])
         if 'wscale' in safe and 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:%s' % (safe['wscale'], safe['hscale'])])
+            optlist.extend(['-vf', '%s=%s:%s' % (self.scale_filter, safe['wscale'], safe['hscale'])])
         elif 'wscale' in safe:
-            optlist.extend(['-vf', 'scale=%s:trunc(ow/a/2)*2' % (safe['wscale'])])
+            optlist.extend(['-vf', '%s=%s:trunc(ow/a/2)*2' % (self.scale_filter, safe['wscale'])])
         elif 'hscale' in safe:
-            optlist.extend(['-vf', 'scale=trunc((oh*a)/2)*2:%s' % (safe['hscale'])])
+            optlist.extend(['-vf', '%s=trunc((oh*a)/2)*2:%s' % (self.scale_filter, safe['hscale'])])
         optlist.extend(['-tag:v', 'hvc1'])
         return optlist
 
@@ -847,14 +1007,50 @@ class HEVCQSV(H265Codec):
     """
     codec_name = 'hevcqsv'
     ffmpeg_codec_name = 'hevc_qsv'
+    scale_filter = 'scale_qsv'
+
+
+class H265VAAPI(H265Codec):
+    """
+    H.265/AVC VAAPI ideo codec.
+    """
+    codec_name = 'h265vaapi'
+    ffmpeg_codec_name = 'hevc_vaapi'
+    scale_filter = 'scale_vaapi'
+
+    def _codec_specific_parse_options(self, safe, stream=0):
+        if 'width' in safe and safe['width']:
+            safe['width'] = 2 * round(safe['width'] / 2)
+            safe['vaapi_wscale'] = safe['width']
+            del(safe['width'])
+        if 'height' in safe and safe['height']:
+            if safe['height'] % 2 == 0:
+                safe['vaapi_hscale'] = safe['height']
+            del(safe['height'])
+        return safe
+
+    def _codec_specific_produce_ffmpeg_list(self, safe, stream=0):
+        optlist = super(H265VAAPI, self)._codec_specific_produce_ffmpeg_list(safe, stream)
+        optlist.extend(['-vaapi_device', '/dev/dri/renderD128'])
+        if 'vaapi_wscale' in safe and 'vaapi_hscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=%s:%s:format=nv12' % (self.scale_filter, safe['vaapi_wscale'], safe['vaapi_hscale'])])
+        elif 'vaapi_wscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=%s:trunc(ow/a/2)*2:format=nv12' % (self.scale_filter, safe['vaapi_wscale'])])
+        elif 'vaapi_hscale' in safe:
+            optlist.extend(['-vf', 'hwupload,%s=trunc((oh*a)/2)*2:%s:format=nv12' % (self.scale_filter, safe['vaapi_hscale'])])
+        else:
+            optlist.extend(['-vf', "format=nv12,hwupload"])
+
+        return optlist
 
 
 class NVEncH265(H265Codec):
     """
     Nvidia H.265/AVC video codec.
     """
-    codec_name = 'nvenc_h265'
+    codec_name = 'h265_nvenc'
     ffmpeg_codec_name = 'hevc_nvenc'
+    scale_filter = 'scale_npp'
 
 
 class DivxCodec(VideoCodec):
@@ -955,6 +1151,14 @@ class WebVTTCodec(SubtitleCodec):
     ffmpeg_codec_name = 'webvtt'
 
 
+class PGSCodec(SubtitleCodec):
+    """
+    PGS subtitle codec.
+    """
+    codec_name = 'pgs'
+    ffmpeg_codec_name = 'copy'
+
+
 class SSA(SubtitleCodec):
     """
     SSA (SubStation Alpha) subtitle.
@@ -989,16 +1193,20 @@ class DVDSub(SubtitleCodec):
 
 audio_codec_list = [
     AudioNullCodec, AudioCopyCodec, VorbisCodec, AacCodec, Mp3Codec, Mp2Codec,
-    FdkAacCodec, FAacCodec, EAc3Codec, Ac3Codec, DtsCodec, FlacCodec
+    FdkAacCodec, FAacCodec, EAc3Codec, Ac3Codec, DtsCodec, FlacCodec, Opus, PCMS24LE, PCMS16LE
 ]
 
 video_codec_list = [
     VideoNullCodec, VideoCopyCodec, TheoraCodec, H264Codec, H264QSV, HEVCQSV, H265Codec,
     DivxCodec, Vp8Codec, H263Codec, FlvCodec, Mpeg1Codec, NVEncH264, NVEncH265,
-    Mpeg2Codec, H264VAAPI
+    Mpeg2Codec, H264VAAPI, H265VAAPI, OMXH264, VideotoolboxEncH264
 ]
 
 subtitle_codec_list = [
     SubtitleNullCodec, SubtitleCopyCodec, MOVTextCodec, SrtCodec, SSA, SubRip, DVDSub,
-    DVBSub, WebVTTCodec
+    DVBSub, WebVTTCodec, PGSCodec
+]
+
+attachment_codec_list = [
+    AttachmentCopyCodec
 ]

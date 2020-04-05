@@ -1,159 +1,173 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
 import sys
-import logging
 import requests
 import time
-from extensions import valid_tagging_extensions
-from readSettings import ReadSettings
-from autoprocess import plex
-from tvdb_mp4 import Tvdb_mp4
-from mkvtomp4 import MkvtoMp4
-from post_processor import PostProcessor
-from logging.config import fileConfig
+from resources.log import getLogger
+from resources.readsettings import ReadSettings
+from resources.metadata import MediaType
+from resources.mediaprocessor import MediaProcessor
 
-logpath = '/var/log/sickbeard_mp4_automator'
+
+def rescanAndWait(host, port, webroot, apikey, protocol, seriesid, log, retries=6, delay=10):
+    headers = {'X-Api-Key': apikey}
+    # First trigger rescan
+    payload = {'name': 'RescanSeries', 'seriesId': seriesid}
+    url = protocol + host + ":" + str(port) + webroot + "/api/command"
+    r = requests.post(url, json=payload, headers=headers)
+    rstate = r.json()
+    try:
+        rstate = rstate[0]
+    except:
+        pass
+    log.info("Sonarr response RescanSeries command: ID %d %s." % (rstate['id'], rstate['state']))
+    log.debug(str(rstate))
+
+    # Then wait for it to finish
+    url = protocol + host + ":" + str(port) + webroot + "/api/command/" + str(rstate['id'])
+    log.info("Requesting episode information from Sonarr for series ID %s." % seriesid)
+    r = requests.get(url, headers=headers)
+    command = r.json()
+    attempts = 0
+    while command['state'].lower() not in ['complete', 'completed'] and attempts < retries:
+        log.info("State: %s." % (command['state']))
+        time.sleep(delay)
+        r = requests.get(url, headers=headers)
+        command = r.json()
+        attempts += 1
+    log.info("Final state: %s." % (command['state']))
+    log.debug(str(command))
+    return command['state'].lower() in ['complete', 'completed']
+
+
+def getEpisodeInformation(host, port, webroot, apikey, protocol, episodeid, log):
+    headers = {'X-Api-Key': apikey}
+    url = protocol + host + ":" + str(port) + webroot + "/api/episode?seriesId=" + seriesid
+    log.info("Requesting updated episode information from Sonarr for series ID %s." % seriesid)
+    r = requests.get(url, headers=headers)
+    payload = r.json()
+    sonarrepinfo = None
+    for ep in payload:
+        if int(ep['episodeNumber']) == episode and int(ep['seasonNumber']) == season:
+            return ep
+    return None
+
+
+def renameSeries(host, port, webroot, apikey, protocol, seriesid, log):
+    headers = {'X-Api-Key': apikey}
+    # First trigger rescan
+    payload = {'name': 'RenameSeries', 'seriesIds': [seriesid]}
+    url = protocol + host + ":" + str(port) + webroot + "/api/command"
+    r = requests.post(url, json=payload, headers=headers)
+    rstate = r.json()
+    try:
+        rstate = rstate[0]
+    except:
+        pass
+    log.info("Sonarr response RenameSeries command: ID %d %s." % (rstate['id'], rstate['state']))
+    log.debug(str(rstate))
+
+
+log = getLogger("SonarrPostProcess")
+
+log.info("Sonarr extra script post processing started.")
 
 if os.environ.get('sonarr_eventtype') == "Test":
     sys.exit(0)
 
-if os.name == 'nt':
-    logpath = os.path.dirname(sys.argv[0])
-elif not os.path.isdir(logpath):
-    try:
-        os.mkdir(logpath)
-    except:
-        logpath = os.path.dirname(sys.argv[0])
-configPath = os.path.abspath(os.path.join(os.path.dirname(sys.argv[0]), 'logging.ini')).replace("\\", "\\\\")
-logPath = os.path.abspath(os.path.join(logpath, 'index.log')).replace("\\", "\\\\")
-fileConfig(configPath, defaults={'logfilename': logPath})
-log = logging.getLogger("SonarrPostConversion")
+settings = ReadSettings()
 
-log.info("Sonarr extra script post processing started.")
-
-settings = ReadSettings(os.path.dirname(sys.argv[0]), "autoProcess.ini")
+log.debug(os.environ)
 
 inputfile = os.environ.get('sonarr_episodefile_path')
 original = os.environ.get('sonarr_episodefile_scenename')
 tvdb_id = int(os.environ.get('sonarr_series_tvdbid'))
 season = int(os.environ.get('sonarr_episodefile_seasonnumber'))
+seriesid = os.environ.get('sonarr_series_id')
 
 try:
     episode = int(os.environ.get('sonarr_episodefile_episodenumbers'))
 except:
     episode = int(os.environ.get('sonarr_episodefile_episodenumbers').split(",")[0])
 
-converter = MkvtoMp4(settings)
+mp = MediaProcessor(settings)
 
 log.debug("Input file: %s." % inputfile)
 log.debug("Original name: %s." % original)
 log.debug("TVDB ID: %s." % tvdb_id)
 log.debug("Season: %s episode: %s." % (season, episode))
+log.debug("Sonarr series ID: %s." % seriesid)
 
-if MkvtoMp4(settings).validSource(inputfile):
-    log.info("Processing %s." % inputfile)
+try:
+    success = mp.fullprocess(inputfile, MediaType.TV, tvdbid=tvdb_id, season=season, episode=episode, original=original)
 
-    output = converter.process(inputfile, original=original)
-
-    if output:
-        # Tag with metadata
-        if settings.tagfile and output['output_extension'] in valid_tagging_extensions:
-            log.info("Tagging %s with ID %s season %s episode %s." % (inputfile, tvdb_id, season, episode))
-            try:
-                tagmp4 = Tvdb_mp4(tvdb_id, season, episode, original, language=settings.taglanguage)
-                tagmp4.setHD(output['x'], output['y'])
-                tagmp4.writeTags(output['output'], settings.artwork, settings.thumbnail)
-            except:
-                log.error("Unable to tag file")
-
-        # QTFS
-        if settings.relocate_moov and output['output_extension'] in valid_tagging_extensions:
-            converter.QTFS(output['output'])
-
-        # Copy to additional locations
-        output_files = converter.replicate(output['output'])
-
+    if success:
         # Update Sonarr to continue monitored status
         try:
             host = settings.Sonarr['host']
             port = settings.Sonarr['port']
-            webroot = settings.Sonarr['web_root']
+            webroot = settings.Sonarr['webroot']
             apikey = settings.Sonarr['apikey']
-            if apikey != '':
-                try:
-                    ssl = int(settings.Sonarr['ssl'])
-                except:
-                    ssl = 0
-                if ssl:
-                    protocol = "https://"
-                else:
-                    protocol = "http://"
+            ssl = settings.Sonarr['ssl']
+            protocol = "https://" if ssl else "http://"
 
-                seriesID = os.environ.get('sonarr_series_id')
-                log.debug("Sonarr host: %s." % host)
-                log.debug("Sonarr port: %s." % port)
-                log.debug("Sonarr webroot: %s." % webroot)
-                log.debug("Sonarr apikey: %s." % apikey)
-                log.debug("Sonarr protocol: %s." % protocol)
-                log.debug("Sonarr sonarr_series_id: %s." % seriesID)
+            log.debug("Sonarr host: %s." % host)
+            log.debug("Sonarr port: %s." % port)
+            log.debug("Sonarr webroot: %s." % webroot)
+            log.debug("Sonarr apikey: %s." % apikey)
+            log.debug("Sonarr protocol: %s." % protocol)
+
+            if apikey != '':
                 headers = {'X-Api-Key': apikey}
 
-                # First trigger rescan
-                payload = {'name': 'RescanSeries', 'seriesId': seriesID}
-                url = protocol + host + ":" + port + webroot + "/api/command"
-                r = requests.post(url, json=payload, headers=headers)
-                rstate = r.json()
-                log.info("Sonarr response: ID %d %s." % (rstate['id'], rstate['state']))
-                log.info(str(rstate)) # debug
+                if rescanAndWait(host, port, webroot, apikey, protocol, seriesid, log):
+                    log.info("Rescan command completed")
 
-                # Then wait for it to finish
-                url = protocol + host + ":" + port + webroot + "/api/command/" + str(rstate['id'])
-                log.info("Requesting episode information from Sonarr for series ID %s." % seriesID)
-                r = requests.get(url, headers=headers)
-                command = r.json()
-                attempts = 0
-                while command['state'].lower() not in ['complete', 'completed']  and attempts < 6:
-                    log.info(str(command['state']))
-                    time.sleep(10)
-                    r = requests.get(url, headers=headers)
-                    command = r.json()
-                    attempts += 1
-                log.info("Command completed")
-                log.info(str(command))
+                    sonarrepinfo = getEpisodeInformation(host, port, webroot, apikey, protocol, seriesid, log)
+                    if not sonarrepinfo:
+                        log.error("No valid episode information found, aborting.")
+                        sys.exit(1)
 
-                # Then get episode information
-                url = protocol + host + ":" + port + webroot + "/api/episode?seriesId=" + seriesID
-                log.info("Requesting updated episode information from Sonarr for series ID %s." % seriesID)
-                r = requests.get(url, headers=headers)
-                payload = r.json()
-                sonarrepinfo = None
-                for ep in payload:
-                    if int(ep['episodeNumber']) == episode and int(ep['seasonNumber']) == season:
-                        sonarrepinfo = ep
-                        break
-                sonarrepinfo['monitored'] = True
+                    if not sonarrepinfo.get('hasFile'):
+                        log.warning("Rescanned episode does not have a file, attempting second rescan.")
+                        if rescanAndWait(host, port, webroot, apikey, protocol, seriesid, log):
+                            sonarrepinfo = getEpisodeInformation(host, port, webroot, apikey, protocol, seriesid, log)
+                            if not sonarrepinfo:
+                                log.error("No valid episode information found, aborting.")
+                                sys.exit(1)
+                            if not sonarrepinfo.get('hasFile'):
+                                log.warning("Rescanned episode still does not have a file, will not set to monitored to prevent endless loop.")
+                                sys.exit(1)
+                            else:
+                                log.info("File found after second rescan.")
+                        else:
+                            log.error("Rescan command timed out")
+                            sys.exit(1)
 
-                # Then set that episode to monitored
-                log.info("Sending PUT request with following payload:") # debug
-                log.info(str(sonarrepinfo)) # debug
+                    # Then set that episode to monitored
+                    sonarrepinfo['monitored'] = True
+                    log.debug("Sending PUT request with following payload:")
+                    log.debug(str(sonarrepinfo))
 
-                url = protocol + host + ":" + port + webroot + "/api/episode/" + str(sonarrepinfo['id'])
-                r = requests.put(url, json=sonarrepinfo, headers=headers)
-                success = r.json()
+                    url = protocol + host + ":" + str(port) + webroot + "/api/episode/" + str(sonarrepinfo['id'])
+                    r = requests.put(url, json=sonarrepinfo, headers=headers)
+                    success = r.json()
 
-                log.info("PUT request returned:") # debug
-                log.info(str(success)) # debug
-                log.info("Sonarr monitoring information updated for episode %s." % success['title'])
+                    log.debug("PUT request returned:")
+                    log.debug(str(success))
+                    log.info("Sonarr monitoring information updated for episode %s." % success['title'])
+
+                    renameSeries(host, port, webroot, apikey, protocol, seriesid, log)
+                else:
+                    log.error("Rescan command timed out")
+                    sys.exit(1)
             else:
-                log.error("Your Sonarr API Key can not be blank. Update autoProcess.ini.")
+                log.error("Your Sonarr API Key is blank. Update autoProcess.ini to enable status updates.")
         except:
             log.exception("Sonarr monitor status update failed.")
-
-        # Run any post process scripts
-        if settings.postprocess:
-            post_processor = PostProcessor(output_files, log)
-            post_processor.setTV(tvdb_id, season, episode)
-            post_processor.run_scripts()
-
-        plex.refreshPlex(settings, 'show', log)
-sys.exit(0)
+    else:
+        log.info("Processing returned False.")
+        sys.exit(1)
+except:
+    log.exception("Error processing file")
+    sys.exit(1)

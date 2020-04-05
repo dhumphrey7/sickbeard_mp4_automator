@@ -12,11 +12,7 @@ def processEpisode(dirName, settings, nzbGet=False, logger=None):
         errorprefix = ""
         infoprefix = ""
 
-    # Setup logging
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger(__name__)
+    log = logger or logging.getLogger(__name__)
 
     log.info("%sSonarr notifier started." % infoprefix)
 
@@ -45,8 +41,8 @@ def processEpisode(dirName, settings, nzbGet=False, logger=None):
     else:
         protocol = "http://"
 
-    webroot = settings.Sonarr['web_root']
-    url = protocol + host + ":" + port + webroot + "/api/command"
+    webroot = settings.Sonarr['webroot']
+    url = protocol + host + ":" + str(port) + webroot + "/api/command"
     payload = {'name': 'downloadedepisodesscan', 'path': dirName}
     headers = {'X-Api-Key': apikey}
 
